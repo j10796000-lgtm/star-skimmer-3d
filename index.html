@@ -21,6 +21,104 @@
 
         <div class="stats">
           <div>
+            <span>Ship</span>
+            <strong id="shipName">Comet</strong>
+          </div>
+          <div>
+            <span>Score</span>
+            <strong id="score">0</strong>
+          </div>
+          <div>
+            <span>Combo</span>
+            <strong id="combo">x1</strong>
+          </div>
+          <div>
+            <span>Speed</span>
+            <strong id="speed">1.0</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="hud hud-bottom">
+        <div class="meter-wrap">
+          <span>Shield</span>
+          <div class="meter"><i id="shield"></i></div>
+        </div>
+        <div class="controls">
+          <kbd>A</kbd><kbd>D</kbd><span>or</span><kbd>←</kbd><kbd>→</kbd>
+          <span>steer</span>
+          <kbd>Space</kbd><span>boost</span>
+        </div>
+      </section>
+
+      <section id="startPanel" class="overlay">
+        <div class="panel">
+          <p class="eyebrow">Arcade hangar</p>
+          <h2>Choose your skimmer. Own the storm.</h2>
+          <p>
+            Pick a ship class, punch through boost rings, collect star cores,
+            and keep your shield alive when the spinners crowd the lane.
+          </p>
+          <div class="ship-select" aria-label="Choose spaceship">
+            <button class="ship-card active" type="button" data-ship="comet">
+              <span class="ship-icon comet"></span>
+              <strong>Comet</strong>
+              <small>Balanced handling</small>
+            </button>
+            <button class="ship-card" type="button" data-ship="raptor">
+              <span class="ship-icon raptor"></span>
+              <strong>Raptor</strong>
+              <small>Sharp turns</small>
+            </button>
+            <button class="ship-card" type="button" data-ship="nebula">
+              <span class="ship-icon nebula"></span>
+              <strong>Nebula</strong>
+              <small>Wide shield profile</small>
+            </button>
+          </div>
+          <button id="startButton" type="button">Start Skimming</button>
+        </div>
+      </section>
+
+      <section id="gameOverPanel" class="overlay hidden">
+        <div class="panel">
+          <p class="eyebrow">Run complete</p>
+          <h2 id="finalScore">Score 0</h2>
+          <p id="finalMessage">That was a warm-up run.</p>
+          <div class="result-actions">
+            <button id="changeShipButton" class="secondary-button" type="button">Change Ship</button>
+            <button id="restartButton" type="button">Run It Back</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Star Skimmer 3D</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main class="game-shell" aria-label="Star Skimmer 3D game">
+      <canvas id="game" aria-label="3D game canvas"></canvas>
+
+      <section class="hud hud-top" aria-live="polite">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <p class="eyebrow">Star Skimmer 3D</p>
+            <h1>Boost through the neon storm</h1>
+          </div>
+        </div>
+
+        <div class="stats">
+          <div>
             <span>Score</span>
             <strong id="score">0</strong>
           </div>
