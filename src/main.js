@@ -36,6 +36,9 @@ const input = { left: false, right: false, boost: false, pointerX: null };
 const lanes = [-4.8, -2.4, 0, 2.4, 4.8];
 const activeObjects = [];
 const particles = [];
+const startingSpeed = 18;
+const maxCruiseSpeed = 30;
+const boostSpeedMultiplier = 1.6;
 let selectedShip = "comet";
 
 const state = {
@@ -498,7 +501,7 @@ function updateParticles(dt) {
 function updateHud() {
   scoreEl.textContent = Math.floor(state.score).toLocaleString();
   comboEl.textContent = `x${state.combo}`;
-  speedEl.textContent = (state.speed / 18).toFixed(1);
+  speedEl.textContent = (state.speed / startingSpeed).toFixed(1);
   shieldEl.style.transform = `scaleX(${Math.max(state.shield, 0) / (100 * shipModels[selectedShip].shield)})`;
 }
 
@@ -517,7 +520,9 @@ function animate() {
 
   if (state.running) {
     const boosted = input.boost && state.shield > 0;
-    state.speed = THREE.MathUtils.lerp(state.speed, boosted ? 32 : 18 + state.distance * 0.012, 0.018);
+    const cruiseSpeed = Math.min(startingSpeed + state.distance * 0.012, maxCruiseSpeed);
+    const targetSpeed = boosted ? cruiseSpeed * boostSpeedMultiplier : cruiseSpeed;
+    state.speed = THREE.MathUtils.lerp(state.speed, targetSpeed, 0.018);
     if (boosted) state.shield = Math.max(0, state.shield - dt * 16);
     else state.shield = Math.min(100, state.shield + dt * 4);
 
