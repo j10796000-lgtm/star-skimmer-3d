@@ -132,7 +132,7 @@ h1 {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(82px, 1fr));
+  grid-template-columns: repeat(5, minmax(82px, 1fr));
   gap: 8px;
 }
 
@@ -253,6 +253,13 @@ kbd {
   color: rgba(247, 255, 248, 0.78);
   font-size: 1.02rem;
   line-height: 1.55;
+}
+
+.panel p.new-best {
+  color: #ffef5c;
+  font-size: 1.18rem;
+  font-weight: 950;
+  text-shadow: 0 0 22px rgba(255, 239, 92, 0.44);
 }
 
 .ship-select {
