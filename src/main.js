@@ -2,6 +2,7 @@ import * as THREE from "https://unpkg.com/three@0.164.1/build/three.module.js";
 
 const canvas = document.querySelector("#game");
 const scoreEl = document.querySelector("#score");
+const highScoreEl = document.querySelector("#highScore");
 const comboEl = document.querySelector("#combo");
 const speedEl = document.querySelector("#speed");
 const shieldEl = document.querySelector("#shield");
@@ -39,7 +40,9 @@ const particles = [];
 const startingSpeed = 18;
 const maxCruiseSpeed = 30;
 const boostSpeedMultiplier = 1.6;
+const highScoreStorageKey = "starSkimmerHighScore";
 let selectedShip = "comet";
+let highScore = readHighScore();
 
 const state = {
   running: false,
@@ -76,6 +79,24 @@ const shipModels = {
     shield: 1.18,
   },
 };
+
+function readHighScore() {
+  try {
+    const storedScore = Number(window.localStorage.getItem(highScoreStorageKey));
+    return Number.isFinite(storedScore) && storedScore > 0 ? storedScore : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveHighScore(score) {
+  highScore = score;
+  try {
+    window.localStorage.setItem(highScoreStorageKey, String(score));
+  } catch {
+    // Keep the best score in memory when browser storage is unavailable.
+  }
+}
 
 const palette = {
   mint: 0x77ff74,
@@ -404,6 +425,7 @@ function resetGame() {
   ship.position.set(0, 1.05, 4);
   ship.rotation.set(0, 0, 0);
   ship.userData.velocity = 0;
+  finalMessage.classList.remove("new-best");
   gameOverPanel.classList.add("hidden");
   startPanel.classList.add("hidden");
   updateHud();
@@ -411,13 +433,25 @@ function resetGame() {
 
 function finishGame() {
   state.running = false;
-  finalScore.textContent = `Score ${Math.floor(state.score).toLocaleString()}`;
-  finalMessage.textContent =
-    state.score > 3000
-      ? `${shipModels[selectedShip].name} left a comet trail through the scoreboard.`
-      : state.score > 1200
-        ? `${shipModels[selectedShip].name} handled the storm cleanly.`
-        : "Tiny sparks still count. Pick a ship and run it back.";
+  const runScore = Math.floor(state.score);
+  const previousHighScore = highScore;
+  const isNewHighScore = runScore > previousHighScore;
+
+  finalMessage.classList.toggle("new-best", isNewHighScore);
+  if (isNewHighScore) {
+    saveHighScore(runScore);
+    finalScore.textContent = `Score ${runScore.toLocaleString()}`;
+    finalMessage.textContent = `NEW BEST! ${shipModels[selectedShip].name} set the bar at ${highScore.toLocaleString()}.`;
+  } else {
+    finalScore.textContent = `Score ${runScore.toLocaleString()} - Best ${highScore.toLocaleString()}`;
+    finalMessage.textContent =
+      state.score > 3000
+        ? `${shipModels[selectedShip].name} left a comet trail through the scoreboard.`
+        : state.score > 1200
+          ? `${shipModels[selectedShip].name} handled the storm cleanly.`
+          : "Tiny sparks still count. Pick a ship and run it back.";
+  }
+  updateHud();
   gameOverPanel.classList.remove("hidden");
 }
 
@@ -500,6 +534,7 @@ function updateParticles(dt) {
 
 function updateHud() {
   scoreEl.textContent = Math.floor(state.score).toLocaleString();
+  highScoreEl.textContent = Math.floor(highScore).toLocaleString();
   comboEl.textContent = `x${state.combo}`;
   speedEl.textContent = (state.speed / startingSpeed).toFixed(1);
   shieldEl.style.transform = `scaleX(${Math.max(state.shield, 0) / (100 * shipModels[selectedShip].shield)})`;
