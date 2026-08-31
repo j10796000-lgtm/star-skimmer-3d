@@ -41,6 +41,13 @@ const startingSpeed = 18;
 const maxCruiseSpeed = 30;
 const boostSpeedMultiplier = 1.6;
 const highScoreStorageKey = "starSkimmerHighScore";
+const audioState = {
+  context: null,
+  masterGain: null,
+  engineOscillator: null,
+  engineGain: null,
+  muted: false,
+};
 let selectedShip = "comet";
 let highScore = readHighScore();
 
@@ -96,6 +103,126 @@ function saveHighScore(score) {
   } catch {
     // Keep the best score in memory when browser storage is unavailable.
   }
+}
+
+function getAudioContext() {
+  if (audioState.context) return audioState.context;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+
+  audioState.context = new AudioContextClass();
+  audioState.masterGain = audioState.context.createGain();
+  audioState.masterGain.gain.value = audioState.muted ? 0 : 0.46;
+  audioState.masterGain.connect(audioState.context.destination);
+  return audioState.context;
+}
+
+function setMuted(muted) {
+  audioState.muted = muted;
+  if (audioState.masterGain && audioState.context) {
+    audioState.masterGain.gain.setTargetAtTime(
+      muted ? 0 : 0.46,
+      audioState.context.currentTime,
+      0.025,
+    );
+  }
+}
+
+async function resumeAudio() {
+  const audioContext = getAudioContext();
+  if (!audioContext) return;
+  if (audioContext.state === "suspended") await audioContext.resume();
+  startEngineHum();
+}
+
+function startEngineHum() {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioState.engineOscillator) return;
+
+  const oscillator = audioContext.createOscillator();
+  const engineGain = audioContext.createGain();
+  oscillator.type = "sawtooth";
+  oscillator.frequency.value = 70;
+  engineGain.gain.value = 0;
+  oscillator.connect(engineGain);
+  engineGain.connect(audioState.masterGain);
+  oscillator.start();
+
+  audioState.engineOscillator = oscillator;
+  audioState.engineGain = engineGain;
+}
+
+function updateEngineHum() {
+  const audioContext = audioState.context;
+  if (!audioContext || !audioState.engineOscillator || !audioState.engineGain) return;
+
+  const targetGain = state.running && !audioState.muted ? 0.12 : 0.0001;
+  const targetFrequency = THREE.MathUtils.clamp(58 + state.speed * 4.2, 70, 280);
+  audioState.engineGain.gain.setTargetAtTime(targetGain, audioContext.currentTime, 0.08);
+  audioState.engineOscillator.frequency.setTargetAtTime(targetFrequency, audioContext.currentTime, 0.045);
+}
+
+function playTone({ type = "sine", startFrequency, endFrequency, duration, volume }) {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioState.muted) return;
+
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  const now = audioContext.currentTime;
+  const stopAt = now + duration;
+
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(startFrequency, now);
+  oscillator.frequency.exponentialRampToValueAtTime(endFrequency, stopAt);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(volume, now + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
+
+  oscillator.connect(gain);
+  gain.connect(audioState.masterGain);
+  oscillator.start(now);
+  oscillator.stop(stopAt + 0.02);
+  oscillator.addEventListener("ended", () => {
+    oscillator.disconnect();
+    gain.disconnect();
+  }, { once: true });
+}
+
+function playStarChime() {
+  playTone({
+    type: "triangle",
+    startFrequency: 920,
+    endFrequency: 1560,
+    duration: 0.12,
+    volume: 0.18,
+  });
+}
+
+function playBoostWhoosh() {
+  playTone({
+    type: "sawtooth",
+    startFrequency: 120,
+    endFrequency: 680,
+    duration: 0.32,
+    volume: 0.16,
+  });
+}
+
+function playHitAlarm() {
+  playTone({
+    type: "square",
+    startFrequency: 230,
+    endFrequency: 150,
+    duration: 0.22,
+    volume: 0.2,
+  });
+  playTone({
+    type: "square",
+    startFrequency: 310,
+    endFrequency: 190,
+    duration: 0.2,
+    volume: 0.12,
+  });
 }
 
 const palette = {
@@ -409,6 +536,7 @@ function spawnBurst(color, origin, count = 16) {
 }
 
 function resetGame() {
+  resumeAudio();
   activeObjects.splice(0).forEach((object) => scene.remove(object));
   particles.splice(0).forEach((object) => scene.remove(object));
   Object.assign(state, {
@@ -433,6 +561,7 @@ function resetGame() {
 
 function finishGame() {
   state.running = false;
+  updateEngineHum();
   const runScore = Math.floor(state.score);
   const previousHighScore = highScore;
   const isNewHighScore = runScore > previousHighScore;
@@ -491,18 +620,21 @@ function updateObjects(dt) {
       if (object.userData.type === "star") {
         state.score += 120 * state.combo;
         state.combo = Math.min(state.combo + 1, 9);
+        playStarChime();
         spawnBurst(palette.yellow, object.position, 18);
         removeActive(i);
       } else if (object.userData.type === "boost") {
         state.score += 220 * state.combo;
         state.speed += 4;
         state.invincible = 0.65;
+        playBoostWhoosh();
         spawnBurst(palette.cyan, object.position, 28);
         removeActive(i);
       } else if (state.invincible <= 0) {
         state.shield -= 34;
         state.combo = 1;
         state.invincible = 1.1;
+        playHitAlarm();
         spawnBurst(palette.pink, ship.position, 34);
         removeActive(i);
         if (state.shield <= 0) finishGame();
@@ -580,11 +712,13 @@ function animate() {
     updateObjects(dt);
     updateParticles(dt);
     updateHud();
+    updateEngineHum();
   } else {
     state.invincible -= dt;
     ship.rotation.y += dt * 0.35;
     ship.position.y = 1.05 + Math.sin(clock.elapsedTime * 2.5) * 0.18;
     updateParticles(dt);
+    updateEngineHum();
   }
 
   ship.visible = state.invincible <= 0 || Math.sin(clock.elapsedTime * 42) > -0.25;
@@ -604,6 +738,7 @@ window.addEventListener("resize", resize);
 window.addEventListener("keydown", (event) => {
   if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = true;
   if (event.code === "ArrowRight" || event.code === "KeyD") input.right = true;
+  if (event.code === "KeyM" && !event.repeat) setMuted(!audioState.muted);
   if (event.code === "Space") {
     input.boost = true;
     if (!state.running && !startPanel.classList.contains("hidden")) resetGame();
