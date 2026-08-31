@@ -12,6 +12,7 @@ const gameOverPanel = document.querySelector("#gameOverPanel");
 const startButton = document.querySelector("#startButton");
 const restartButton = document.querySelector("#restartButton");
 const changeShipButton = document.querySelector("#changeShipButton");
+const controlsEl = document.querySelector(".controls");
 const shipCards = document.querySelectorAll(".ship-card");
 const finalScore = document.querySelector("#finalScore");
 const finalMessage = document.querySelector("#finalMessage");
@@ -46,6 +47,7 @@ const audioState = {
   masterGain: null,
   engineOscillator: null,
   engineGain: null,
+  muteButton: null,
   muted: false,
 };
 let selectedShip = "comet";
@@ -119,6 +121,7 @@ function getAudioContext() {
 
 function setMuted(muted) {
   audioState.muted = muted;
+  updateMuteButton();
   if (audioState.masterGain && audioState.context) {
     audioState.masterGain.gain.setTargetAtTime(
       muted ? 0 : 0.46,
@@ -126,6 +129,33 @@ function setMuted(muted) {
       0.025,
     );
   }
+}
+
+function createMuteButton() {
+  if (!controlsEl) return;
+  const muteButton = document.createElement("button");
+  muteButton.type = "button";
+  muteButton.setAttribute("aria-label", "Toggle sound");
+  muteButton.style.minHeight = "28px";
+  muteButton.style.marginTop = "0";
+  muteButton.style.border = "1px solid rgba(255, 255, 255, 0.2)";
+  muteButton.style.borderRadius = "6px";
+  muteButton.style.padding = "0 9px";
+  muteButton.style.background = "rgba(255, 255, 255, 0.11)";
+  muteButton.style.color = "#fff";
+  muteButton.style.boxShadow = "none";
+  muteButton.style.fontSize = "0.78rem";
+  muteButton.style.pointerEvents = "auto";
+  muteButton.addEventListener("click", () => setMuted(!audioState.muted));
+  controlsEl.append(muteButton);
+  audioState.muteButton = muteButton;
+  updateMuteButton();
+}
+
+function updateMuteButton() {
+  if (!audioState.muteButton) return;
+  audioState.muteButton.textContent = audioState.muted ? "Sound Off" : "Sound On";
+  audioState.muteButton.setAttribute("aria-pressed", String(audioState.muted));
 }
 
 async function resumeAudio() {
@@ -776,6 +806,7 @@ shipCards.forEach((card) => {
   card.addEventListener("click", () => setShipModel(card.dataset.ship));
 });
 
+createMuteButton();
 setShipModel(selectedShip);
 resize();
 animate();
