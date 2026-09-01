@@ -52,6 +52,7 @@ const audioState = {
 };
 let selectedShip = "comet";
 let highScore = readHighScore();
+let lastSpawnPatternId = null;
 
 const state = {
   running: false,
@@ -530,23 +531,123 @@ function createBoostRing(x, z) {
   activeObjects.push(ring);
 }
 
+const spawnPatterns = [
+  {
+    id: "star-drift",
+    minDistance: 0,
+    run(z, shuffled) {
+      shuffled.slice(0, 3).forEach((x, index) => createCollectible(x, z - index * 3.6));
+      createObstacle(shuffled[4], z - 2);
+    },
+  },
+  {
+    id: "boost-thread",
+    minDistance: 0,
+    run(z, shuffled) {
+      createBoostRing(shuffled[0], z - 4);
+      createObstacle(shuffled[1], z - 10);
+      createCollectible(shuffled[2], z - 16);
+      createCollectible(shuffled[3], z - 20);
+    },
+  },
+  {
+    id: "split-lanes",
+    minDistance: 0,
+    run(z, shuffled) {
+      shuffled.slice(0, 2).forEach((x) => createObstacle(x, z));
+      shuffled.slice(2, 5).forEach((x, index) => createCollectible(x, z - 5 - index * 4));
+    },
+  },
+  {
+    id: "outer-pins",
+    minDistance: 420,
+    run(z) {
+      createObstacle(lanes[0], z);
+      createObstacle(lanes[4], z - 1.8);
+      [lanes[1], lanes[2], lanes[3]].forEach((x, index) => createCollectible(x, z - 6 - index * 3.3));
+    },
+  },
+  {
+    id: "center-weave",
+    minDistance: 760,
+    run(z) {
+      [lanes[1], lanes[3], lanes[1], lanes[3]].forEach((x, index) => createCollectible(x, z - index * 4));
+      createObstacle(lanes[2], z - 2);
+      createObstacle(lanes[0], z - 10);
+      createObstacle(lanes[4], z - 16);
+    },
+  },
+  {
+    id: "reward-cluster",
+    minDistance: 980,
+    run(z) {
+      [lanes[1], lanes[2], lanes[3], lanes[0], lanes[4]].forEach((x, index) => createCollectible(x, z - index * 2.6));
+      createBoostRing(lanes[2], z - 15);
+    },
+  },
+  {
+    id: "switchback-gates",
+    minDistance: 1320,
+    run(z) {
+      createObstacle(lanes[0], z);
+      createObstacle(lanes[1], z);
+      createCollectible(lanes[4], z - 3);
+      createObstacle(lanes[3], z - 7);
+      createObstacle(lanes[4], z - 7);
+      createCollectible(lanes[0], z - 10);
+      createObstacle(lanes[0], z - 14);
+      createObstacle(lanes[2], z - 14);
+      createBoostRing(lanes[3], z - 18);
+    },
+  },
+  {
+    id: "mirror-squeeze",
+    minDistance: 1700,
+    run(z) {
+      [lanes[0], lanes[4]].forEach((x) => createObstacle(x, z));
+      [lanes[1], lanes[3]].forEach((x) => createCollectible(x, z - 4));
+      [lanes[1], lanes[3]].forEach((x) => createObstacle(x, z - 9));
+      createCollectible(lanes[2], z - 12);
+    },
+  },
+  {
+    id: "boost-trap",
+    minDistance: 2150,
+    run(z, shuffled) {
+      createObstacle(shuffled[0], z);
+      createObstacle(shuffled[1], z - 2);
+      createBoostRing(shuffled[2], z - 8);
+      createObstacle(shuffled[3], z - 13);
+      createCollectible(shuffled[4], z - 17);
+    },
+  },
+  {
+    id: "late-gauntlet",
+    minDistance: 2700,
+    run(z) {
+      [lanes[0], lanes[1], lanes[3], lanes[4]].forEach((x) => createObstacle(x, z));
+      createObstacle(lanes[2], z - 7);
+      createObstacle(lanes[3], z - 7);
+      createObstacle(lanes[4], z - 7);
+      createObstacle(lanes[0], z - 14);
+      createObstacle(lanes[1], z - 14);
+      createObstacle(lanes[2], z - 14);
+    },
+  },
+];
+
 function spawnWave() {
   const z = -96;
-  const pattern = Math.random();
   const shuffled = [...lanes].sort(() => Math.random() - 0.5);
+  const availablePatterns = spawnPatterns.filter((pattern) => pattern.minDistance <= state.distance);
+  const repeatSafePatterns =
+    availablePatterns.length > 1
+      ? availablePatterns.filter((pattern) => pattern.id !== lastSpawnPatternId)
+      : availablePatterns;
+  const pattern = repeatSafePatterns[Math.floor(Math.random() * repeatSafePatterns.length)];
 
-  if (pattern < 0.38) {
-    shuffled.slice(0, 3).forEach((x, index) => createCollectible(x, z - index * 3.6));
-    createObstacle(shuffled[4], z - 2);
-  } else if (pattern < 0.72) {
-    createBoostRing(shuffled[0], z - 4);
-    createObstacle(shuffled[1], z - 10);
-    createCollectible(shuffled[2], z - 16);
-    createCollectible(shuffled[3], z - 20);
-  } else {
-    shuffled.slice(0, 2).forEach((x) => createObstacle(x, z));
-    shuffled.slice(2, 5).forEach((x, index) => createCollectible(x, z - 5 - index * 4));
-  }
+  lastSpawnPatternId = pattern.id;
+  pattern.run(z, shuffled);
 }
 
 function spawnBurst(color, origin, count = 16) {
@@ -569,6 +670,7 @@ function resetGame() {
   resumeAudio();
   activeObjects.splice(0).forEach((object) => scene.remove(object));
   particles.splice(0).forEach((object) => scene.remove(object));
+  lastSpawnPatternId = null;
   Object.assign(state, {
     running: true,
     score: 0,
