@@ -45,8 +45,12 @@ const highScoreStorageKey = "starSkimmerHighScore";
 const audioState = {
   context: null,
   masterGain: null,
-  engineOscillator: null,
+  engineOscillators: [],
+  engineLayerGains: [],
+  engineFilter: null,
   engineGain: null,
+  engineLfo: null,
+  engineLfoGain: null,
   muteButton: null,
   muted: false,
 };
@@ -123,6 +127,8 @@ function getAudioContext() {
 function setMuted(muted) {
   audioState.muted = muted;
   updateMuteButton();
+  if (muted) stopEngineHum();
+  else if (state.running) resumeAudio();
   if (audioState.masterGain && audioState.context) {
     audioState.masterGain.gain.setTargetAtTime(
       muted ? 0 : 0.46,
@@ -168,29 +174,121 @@ async function resumeAudio() {
 
 function startEngineHum() {
   const audioContext = getAudioContext();
-  if (!audioContext || audioState.engineOscillator) return;
+  if (!audioContext || audioState.muted || audioState.engineOscillators.length) return;
 
-  const oscillator = audioContext.createOscillator();
+  const oscillator1 = audioContext.createOscillator();
+  const oscillator2 = audioContext.createOscillator();
+  const oscillator3 = audioContext.createOscillator();
+  const layer1Gain = audioContext.createGain();
+  const layer2Gain = audioContext.createGain();
+  const layer3Gain = audioContext.createGain();
+  const filter = audioContext.createBiquadFilter();
   const engineGain = audioContext.createGain();
-  oscillator.type = "sawtooth";
-  oscillator.frequency.value = 70;
-  engineGain.gain.value = 0;
-  oscillator.connect(engineGain);
-  engineGain.connect(audioState.masterGain);
-  oscillator.start();
+  const lfo = audioContext.createOscillator();
+  const lfoGain = audioContext.createGain();
 
-  audioState.engineOscillator = oscillator;
+  oscillator1.type = "sine";
+  oscillator2.type = "triangle";
+  oscillator3.type = "sine";
+  oscillator1.frequency.value = 55;
+  oscillator2.frequency.value = 58;
+  oscillator3.frequency.value = 110;
+  layer1Gain.gain.value = 1;
+  layer2Gain.gain.value = 0.9;
+  layer3Gain.gain.value = 0.23;
+  filter.type = "lowpass";
+  filter.frequency.value = 400;
+  filter.Q.value = 0.7;
+  engineGain.gain.value = 0;
+  lfo.type = "sine";
+  lfo.frequency.value = 7.4;
+  lfoGain.gain.value = 0;
+
+  oscillator1.connect(layer1Gain);
+  oscillator2.connect(layer2Gain);
+  oscillator3.connect(layer3Gain);
+  layer1Gain.connect(filter);
+  layer2Gain.connect(filter);
+  layer3Gain.connect(filter);
+  filter.connect(engineGain);
+  lfo.connect(lfoGain);
+  lfoGain.connect(engineGain.gain);
+  engineGain.connect(audioState.masterGain);
+
+  oscillator1.start();
+  oscillator2.start();
+  oscillator3.start();
+  lfo.start();
+
+  audioState.engineOscillators = [oscillator1, oscillator2, oscillator3];
+  audioState.engineLayerGains = [layer1Gain, layer2Gain, layer3Gain];
+  audioState.engineFilter = filter;
   audioState.engineGain = engineGain;
+  audioState.engineLfo = lfo;
+  audioState.engineLfoGain = lfoGain;
+  updateEngineHum();
+}
+
+function stopEngineHum() {
+  const audioContext = audioState.context;
+  if (!audioContext || !audioState.engineOscillators.length) return;
+
+  const stopAt = audioContext.currentTime + 0.04;
+  if (audioState.engineGain) {
+    audioState.engineGain.gain.cancelScheduledValues(audioContext.currentTime);
+    audioState.engineGain.gain.setTargetAtTime(0.0001, audioContext.currentTime, 0.015);
+  }
+
+  [...audioState.engineOscillators, audioState.engineLfo].filter(Boolean).forEach((oscillator) => {
+    oscillator.stop(stopAt);
+    oscillator.addEventListener("ended", () => oscillator.disconnect(), { once: true });
+  });
+  [
+    ...audioState.engineLayerGains,
+    audioState.engineFilter,
+    audioState.engineGain,
+    audioState.engineLfoGain,
+  ].filter(Boolean).forEach((node) => {
+    window.setTimeout(() => node.disconnect(), 90);
+  });
+
+  audioState.engineOscillators = [];
+  audioState.engineLayerGains = [];
+  audioState.engineFilter = null;
+  audioState.engineGain = null;
+  audioState.engineLfo = null;
+  audioState.engineLfoGain = null;
 }
 
 function updateEngineHum() {
   const audioContext = audioState.context;
-  if (!audioContext || !audioState.engineOscillator || !audioState.engineGain) return;
+  if (
+    !audioContext ||
+    !audioState.engineOscillators.length ||
+    !audioState.engineGain ||
+    !audioState.engineFilter ||
+    !audioState.engineLfoGain
+  ) return;
 
-  const targetGain = state.running && !audioState.muted ? 0.12 : 0.0001;
-  const targetFrequency = THREE.MathUtils.clamp(58 + state.speed * 4.2, 70, 280);
-  audioState.engineGain.gain.setTargetAtTime(targetGain, audioContext.currentTime, 0.08);
-  audioState.engineOscillator.frequency.setTargetAtTime(targetFrequency, audioContext.currentTime, 0.045);
+  const boosted = input.boost && state.shield > 0;
+  const speedProgress = THREE.MathUtils.clamp(
+    (state.speed - startingSpeed) / (maxCruiseSpeed - startingSpeed),
+    0,
+    1,
+  );
+  const baseFrequency = THREE.MathUtils.lerp(55, 90, speedProgress);
+  const detuneGap = boosted ? THREE.MathUtils.lerp(5, 6, speedProgress) : 3;
+  const cutoff = boosted ? 4000 : THREE.MathUtils.lerp(400, 2800, speedProgress);
+  const baseGain = state.running ? 0.034 * (boosted ? 1.36 : 1) : 0.0001;
+  const now = audioContext.currentTime;
+  const [oscillator1, oscillator2, oscillator3] = audioState.engineOscillators;
+
+  oscillator1.frequency.setTargetAtTime(baseFrequency, now, 0.045);
+  oscillator2.frequency.setTargetAtTime(baseFrequency + detuneGap, now, 0.045);
+  oscillator3.frequency.setTargetAtTime(baseFrequency * 2, now, 0.045);
+  audioState.engineFilter.frequency.setTargetAtTime(cutoff, now, 0.055);
+  audioState.engineGain.gain.setTargetAtTime(baseGain, now, 0.075);
+  audioState.engineLfoGain.gain.setTargetAtTime(baseGain * 0.05, now, 0.075);
 }
 
 function playTone({ type = "sine", startFrequency, endFrequency, duration, volume }) {
@@ -693,7 +791,7 @@ function resetGame() {
 
 function finishGame() {
   state.running = false;
-  updateEngineHum();
+  stopEngineHum();
   const runScore = Math.floor(state.score);
   const previousHighScore = highScore;
   const isNewHighScore = runScore > previousHighScore;
