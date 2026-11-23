@@ -41,6 +41,20 @@ const particles = [];
 const startingSpeed = 18;
 const maxCruiseSpeed = 30;
 const boostSpeedMultiplier = 1.6;
+
+// SPAWN-TUNING-BEGIN
+// Obstacle layout fairness. Everything the layout audit and the wave spacing use lives here.
+const OBSTACLE_RADIUS = 1.25; // hit distance of a spinner (see createObstacle)
+const SAFE_ROW_SPACING = 14; // z-units between wall rows in the hardest patterns (~0.4s at max speed)
+const MIN_WAVE_SEPARATION = 16; // z-units between one wave's last hazard and the next wave's first
+const SPAWN_Z = -96;
+const FIELD_HALF_WIDTH = 5.7; // ship is clamped to +/- this
+const AUDIT_SPEED = maxCruiseSpeed + 4; // max cruise plus the surge from a boost ring
+const REACTION_ALLOWANCE = 0.12; // seconds a player needs before the ship starts to move
+const REACH_MARGIN = 0.8; // only trust 80% of the ship's theoretical sideways travel
+const MIN_USABLE_GAP = 0.6; // a gap narrower than this is not a real gap
+const ROW_GROUP_TOLERANCE = OBSTACLE_RADIUS * 2; // obstacles this close in z count as one row
+// SPAWN-TUNING-END
 const highScoreStorageKey = "starSkimmerHighScore";
 const audioState = {
   context: null,
@@ -57,6 +71,8 @@ const audioState = {
 let selectedShip = "comet";
 let highScore = readHighScore();
 let lastSpawnPatternId = null;
+let pendingPattern = null;
+let patternRecorder = null; // when set, createX() only records obstacle positions (used by the layout audit)
 
 const state = {
   running: false,
@@ -569,6 +585,7 @@ function createStarField() {
 }
 
 function createCollectible(x, z) {
+  if (patternRecorder) return;
   const group = new THREE.Group();
   const core = new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.48, 1),
@@ -593,6 +610,10 @@ function createCollectible(x, z) {
 }
 
 function createObstacle(x, z) {
+  if (patternRecorder) {
+    patternRecorder.push({ x, z });
+    return;
+  }
   const group = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({
     color: palette.pink,
@@ -606,12 +627,13 @@ function createObstacle(x, z) {
   const core = new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 10), mat);
   group.add(barA, barB, core);
   group.position.set(x, 1.28, z);
-  group.userData = { type: "spinner", radius: 1.25, spin: Math.random() > 0.5 ? 1 : -1 };
+  group.userData = { type: "spinner", radius: OBSTACLE_RADIUS, spin: Math.random() > 0.5 ? 1 : -1 };
   scene.add(group);
   activeObjects.push(group);
 }
 
 function createBoostRing(x, z) {
+  if (patternRecorder) return;
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(1.1, 0.09, 12, 48),
     new THREE.MeshStandardMaterial({
@@ -687,15 +709,13 @@ const spawnPatterns = [
     id: "switchback-gates",
     minDistance: 1320,
     run(z) {
-      createObstacle(lanes[0], z);
-      createObstacle(lanes[1], z);
-      createCollectible(lanes[4], z - 3);
-      createObstacle(lanes[3], z - 7);
-      createObstacle(lanes[4], z - 7);
-      createCollectible(lanes[0], z - 10);
-      createObstacle(lanes[0], z - 14);
-      createObstacle(lanes[2], z - 14);
-      createBoostRing(lanes[3], z - 18);
+      // Three walls, spaced out so the ship has time to slide to each gap.
+      [0, 1].forEach((i) => createObstacle(lanes[i], z));
+      createCollectible(lanes[2], z - SAFE_ROW_SPACING / 2);
+      [3, 4].forEach((i) => createObstacle(lanes[i], z - SAFE_ROW_SPACING));
+      createCollectible(lanes[1], z - SAFE_ROW_SPACING * 1.5);
+      [0, 2].forEach((i) => createObstacle(lanes[i], z - SAFE_ROW_SPACING * 2));
+      createBoostRing(lanes[3], z - SAFE_ROW_SPACING * 2 - 4);
     },
   },
   {
@@ -723,29 +743,144 @@ const spawnPatterns = [
     id: "late-gauntlet",
     minDistance: 2700,
     run(z) {
-      [lanes[0], lanes[1], lanes[3], lanes[4]].forEach((x) => createObstacle(x, z));
-      createObstacle(lanes[2], z - 7);
-      createObstacle(lanes[3], z - 7);
-      createObstacle(lanes[4], z - 7);
-      createObstacle(lanes[0], z - 14);
-      createObstacle(lanes[1], z - 14);
-      createObstacle(lanes[2], z - 14);
+      // A staircase of three walls. Each wall leaves a two-lane gap that overlaps the
+      // previous wall's gap, so the player slides across the track instead of having to
+      // snap from one side to the other. Mirrored at random. Stars mark the safe line.
+      const flip = Math.random() < 0.5;
+      const lane = (i) => lanes[flip ? 4 - i : i];
+      [0, 1, 4].forEach((i) => createObstacle(lane(i), z));
+      createCollectible(lane(2), z - SAFE_ROW_SPACING / 2);
+      [0, 3, 4].forEach((i) => createObstacle(lane(i), z - SAFE_ROW_SPACING));
+      createCollectible(lane(1), z - SAFE_ROW_SPACING * 1.5);
+      [2, 3, 4].forEach((i) => createObstacle(lane(i), z - SAFE_ROW_SPACING * 2));
+      createCollectible(lane(0), z - SAFE_ROW_SPACING * 2.4);
     },
   },
 ];
 
-function spawnWave() {
-  const z = -96;
-  const shuffled = [...lanes].sort(() => Math.random() - 0.5);
-  const availablePatterns = spawnPatterns.filter((pattern) => pattern.minDistance <= state.distance);
-  const repeatSafePatterns =
-    availablePatterns.length > 1
-      ? availablePatterns.filter((pattern) => pattern.id !== lastSpawnPatternId)
-      : availablePatterns;
-  const pattern = repeatSafePatterns[Math.floor(Math.random() * repeatSafePatterns.length)];
+// SPAWN-AUDIT-BEGIN
+// How far the slowest ship can slide sideways in `seconds`. Mirrors updateShip():
+// top speed is 11 * agility and velocity eases in at a rate of 1 - 0.001^dt.
+function slowestShipReach(seconds) {
+  const topSpeed = 11 * Math.min(...Object.values(shipModels).map((model) => model.agility));
+  const easeTime = 1 / Math.log(1000);
+  const t = Math.max(0, seconds - REACTION_ALLOWANCE);
+  return REACH_MARGIN * topSpeed * (t - easeTime * (1 - Math.exp(-t / easeTime)));
+}
 
+// x-ranges the ship can occupy while crossing a row of obstacles.
+function freeIntervals(xs) {
+  const blocked = xs.map((x) => [x - OBSTACLE_RADIUS, x + OBSTACLE_RADIUS]).sort((a, b) => a[0] - b[0]);
+  const free = [];
+  let cursor = -FIELD_HALF_WIDTH;
+  for (const [low, high] of blocked) {
+    if (low > cursor) free.push([cursor, Math.min(low, FIELD_HALF_WIDTH)]);
+    cursor = Math.max(cursor, high);
+  }
+  if (cursor < FIELD_HALF_WIDTH) free.push([cursor, FIELD_HALF_WIDTH]);
+  return free.filter(([low, high]) => high - low > 0.001);
+}
+
+function intersectIntervals(a, b) {
+  const out = [];
+  for (const [aLow, aHigh] of a) {
+    for (const [bLow, bHigh] of b) {
+      const low = Math.max(aLow, bLow);
+      const high = Math.min(aHigh, bHigh);
+      if (high - low > 0.001) out.push([low, high]);
+    }
+  }
+  return out;
+}
+
+function recordPattern(pattern) {
+  const recorded = [];
+  patternRecorder = recorded;
+  try {
+    pattern.run(0, [...lanes].sort(() => Math.random() - 0.5));
+  } finally {
+    patternRecorder = null;
+  }
+  return recorded.map((obstacle) => ({ x: obstacle.x, offset: -obstacle.z }));
+}
+
+function groupObstacleRows(obstacles) {
+  const rows = [];
+  [...obstacles]
+    .sort((a, b) => a.offset - b.offset)
+    .forEach((obstacle) => {
+      const row = rows[rows.length - 1];
+      if (row && obstacle.offset - row.last <= ROW_GROUP_TOLERANCE) {
+        row.xs.push(obstacle.x);
+        row.last = obstacle.offset;
+      } else {
+        rows.push({ first: obstacle.offset, last: obstacle.offset, xs: [obstacle.x] });
+      }
+    });
+  return rows.map((row) => ({ ...row, free: freeIntervals(row.xs) }));
+}
+
+// Can the slowest ship get through every row, starting anywhere in the first gap?
+function rowsAreBeatable(rows) {
+  if (!rows.length) return true;
+  const usable = (intervals) => intervals.filter(([low, high]) => high - low >= MIN_USABLE_GAP);
+  let reach = usable(rows[0].free);
+  for (let i = 1; i < rows.length && reach.length; i++) {
+    const slide = slowestShipReach((rows[i].first - rows[i - 1].last) / AUDIT_SPEED);
+    const grown = reach.map(([low, high]) => [low - slide, high + slide]);
+    reach = usable(intersectIntervals(grown, rows[i].free));
+  }
+  return reach.length > 0;
+}
+
+const AUDIT_SAMPLES = 60;
+function auditSpawnPatterns() {
+  spawnPatterns.forEach((pattern) => {
+    let beatable = true;
+    for (let i = 0; i < AUDIT_SAMPLES && beatable; i++) {
+      const obstacles = recordPattern(pattern);
+      if (i === 0) pattern.headOffset = obstacles.length ? Math.min(...obstacles.map((o) => o.offset)) : null;
+      beatable = rowsAreBeatable(groupObstacleRows(obstacles));
+    }
+    if (!beatable) {
+      console.warn(`[spawn audit] "${pattern.id}" can leave the slowest ship no way through. Widen its gaps or space its rows further apart.`);
+    }
+  });
+}
+// SPAWN-AUDIT-END
+
+auditSpawnPatterns();
+
+// z of the farthest-away hazard still on the track (Infinity when there are none).
+function hazardTailZ() {
+  let tail = Infinity;
+  activeObjects.forEach((object) => {
+    if (object.userData.type === "spinner") tail = Math.min(tail, object.position.z);
+  });
+  return tail;
+}
+
+// Returns false (and keeps the chosen pattern waiting) until there is room for it.
+function spawnWave() {
+  if (!pendingPattern) {
+    const availablePatterns = spawnPatterns.filter((pattern) => pattern.minDistance <= state.distance);
+    const repeatSafePatterns =
+      availablePatterns.length > 1
+        ? availablePatterns.filter((pattern) => pattern.id !== lastSpawnPatternId)
+        : availablePatterns;
+    pendingPattern = repeatSafePatterns[Math.floor(Math.random() * repeatSafePatterns.length)];
+  }
+
+  const pattern = pendingPattern;
+  if (pattern.headOffset !== null && pattern.headOffset !== undefined) {
+    const headZ = SPAWN_Z - pattern.headOffset;
+    if (hazardTailZ() < headZ + MIN_WAVE_SEPARATION) return false;
+  }
+
+  pendingPattern = null;
   lastSpawnPatternId = pattern.id;
-  pattern.run(z, shuffled);
+  pattern.run(SPAWN_Z, [...lanes].sort(() => Math.random() - 0.5));
+  return true;
 }
 
 function spawnBurst(color, origin, count = 16) {
@@ -769,6 +904,7 @@ function resetGame() {
   activeObjects.splice(0).forEach((object) => scene.remove(object));
   particles.splice(0).forEach((object) => scene.remove(object));
   lastSpawnPatternId = null;
+  pendingPattern = null;
   Object.assign(state, {
     running: true,
     score: 0,
@@ -929,8 +1065,7 @@ function animate() {
     state.invincible -= dt;
     state.sparkTimer -= dt;
 
-    if (state.spawnTimer <= 0) {
-      spawnWave();
+    if (state.spawnTimer <= 0 && spawnWave()) {
       state.spawnTimer = Math.max(0.74, 1.24 - state.distance * 0.0009);
     }
     if (state.sparkTimer <= 0) {
