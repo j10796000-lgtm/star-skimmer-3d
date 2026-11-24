@@ -1,4 +1,4 @@
-import * as THREE from "https://unpkg.com/three@0.164.1/build/three.module.js";
+import * as THREE from "https://unpkg.com/three@0.164.1/build/three.module.min.js";
 
 const canvas = document.querySelector("#game");
 const scoreEl = document.querySelector("#score");
@@ -16,6 +16,11 @@ const controlsEl = document.querySelector(".controls");
 const shipCards = document.querySelectorAll(".ship-card");
 const finalScore = document.querySelector("#finalScore");
 const finalMessage = document.querySelector("#finalMessage");
+const boostEl = document.querySelector("#boost");
+const pausePanel = document.querySelector("#pausePanel");
+const resumeButton = document.querySelector("#resumeButton");
+const shareButton = document.querySelector("#shareButton");
+const calloutEl = document.querySelector("#callout");
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x07110f, 0.042);
@@ -25,10 +30,22 @@ camera.position.set(0, 6.4, 12.5);
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
-  antialias: true,
+  antialias: window.devicePixelRatio < 1.75, // multisampling is wasted work on high-density screens
   powerPreference: "high-performance",
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Render resolution adapts to the device: it steps down when frames run slow and
+// creeps back up when there is headroom (see updateQuality).
+const quality = {
+  current: Math.min(window.devicePixelRatio || 1, 2),
+  ceiling: Math.min(window.devicePixelRatio || 1, 2),
+  floor: 0.75,
+  smoothed: 1 / 60,
+  sinceCheck: 0,
+  goodChecks: 0,
+  elapsed: 0,
+  lastRaise: -Infinity,
+};
+renderer.setPixelRatio(quality.current);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
@@ -41,6 +58,18 @@ const particles = [];
 const startingSpeed = 18;
 const maxCruiseSpeed = 30;
 const boostSpeedMultiplier = 1.6;
+
+// Gameplay and performance tuning.
+const BOOST_DRAIN = 26; // boost meter lost per second while boosting (about 3.8s from full)
+const BOOST_REGEN = 14; // boost meter regained per second while not boosting
+const BOOST_REARM = 30; // after running dry, boost stays off until the meter refills this far (stops rapid on/off flicker)
+const SHIELD_REGEN = 3; // shield regained per second
+const CLOSE_CALL_WINDOW = 0.8; // passing an obstacle by less than this (beyond its hit radius) counts
+const CLOSE_CALL_POINTS = 60; // times your combo
+const CULL_Z = -80; // objects farther away than this are fully lost in the fog, so skip drawing them
+const MAX_PARTICLES = 600;
+const HUM_UPDATE_INTERVAL = 0.08; // seconds between engine-sound updates
+const SHARE_URL = "https://star-skimmer-3d.vercel.app/";
 
 // SPAWN-TUNING-BEGIN
 // Obstacle layout fairness. Everything the layout audit and the wave spacing use lives here.
@@ -67,6 +96,7 @@ const audioState = {
   engineLfoGain: null,
   muteButton: null,
   muted: false,
+  humTimer: 0,
 };
 let selectedShip = "comet";
 let highScore = readHighScore();
@@ -84,6 +114,9 @@ const state = {
   invincible: 0,
   spawnTimer: 0,
   sparkTimer: 0,
+  boost: 100,
+  boostLocked: false,
+  paused: false,
 };
 
 const shipModels = {
@@ -286,7 +319,7 @@ function updateEngineHum() {
     !audioState.engineLfoGain
   ) return;
 
-  const boosted = input.boost && state.shield > 0;
+  const boosted = isBoosting();
   const speedProgress = THREE.MathUtils.clamp(
     (state.speed - startingSpeed) / (maxCruiseSpeed - startingSpeed),
     0,
@@ -388,6 +421,100 @@ scene.add(sun);
 const rim = new THREE.PointLight(palette.cyan, 34, 45);
 rim.position.set(6, 4, 6);
 scene.add(rim);
+
+// ── Shared resources ─────────────────────────────────────────────────────────
+// Every star, spinner and ring reuses these geometries and materials, so nothing is
+// allocated (or leaked) while the game runs and the GPU can batch similar draws.
+function mergeGeometries(geometries) {
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  let offset = 0;
+  geometries.forEach((geometry) => {
+    const position = geometry.attributes.position;
+    const normal = geometry.attributes.normal;
+    for (let i = 0; i < position.count; i++) {
+      positions.push(position.getX(i), position.getY(i), position.getZ(i));
+      normals.push(normal.getX(i), normal.getY(i), normal.getZ(i));
+    }
+    for (let i = 0; i < geometry.index.count; i++) indices.push(geometry.index.getX(i) + offset);
+    offset += position.count;
+    geometry.dispose();
+  });
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  merged.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  merged.setIndex(indices);
+  return merged;
+}
+
+const assets = {
+  starCoreGeo: new THREE.IcosahedronGeometry(0.48, 1),
+  starCoreMat: new THREE.MeshStandardMaterial({
+    color: palette.yellow,
+    emissive: palette.yellow,
+    emissiveIntensity: 1.25,
+    roughness: 0.2,
+    metalness: 0.2,
+  }),
+  starRingGeo: new THREE.TorusGeometry(0.72, 0.045, 8, 36).rotateX(Math.PI / 2),
+  starRingMat: new THREE.MeshBasicMaterial({ color: palette.mint }),
+  // The two bars and the core of a spinner are one merged mesh: one draw call instead of three.
+  spinnerGeo: mergeGeometries([
+    new THREE.BoxGeometry(2.1, 0.28, 0.28),
+    new THREE.BoxGeometry(0.28, 2.1, 0.28),
+    new THREE.SphereGeometry(0.36, 16, 10),
+  ]),
+  spinnerMat: new THREE.MeshStandardMaterial({
+    color: palette.pink,
+    emissive: palette.pink,
+    emissiveIntensity: 0.65,
+    roughness: 0.28,
+    metalness: 0.32,
+  }),
+  boostRingGeo: new THREE.TorusGeometry(1.1, 0.09, 12, 48),
+  boostRingMat: new THREE.MeshStandardMaterial({
+    color: palette.cyan,
+    emissive: palette.cyan,
+    emissiveIntensity: 1.1,
+    roughness: 0.2,
+    metalness: 0.3,
+  }),
+};
+
+// All sparks and bursts are one instanced mesh fed from typed arrays (one draw call, no per-spark objects).
+const particlePool = {
+  count: 0,
+  px: new Float32Array(MAX_PARTICLES),
+  py: new Float32Array(MAX_PARTICLES),
+  pz: new Float32Array(MAX_PARTICLES),
+  vx: new Float32Array(MAX_PARTICLES),
+  vy: new Float32Array(MAX_PARTICLES),
+  vz: new Float32Array(MAX_PARTICLES),
+  life: new Float32Array(MAX_PARTICLES),
+  r: new Float32Array(MAX_PARTICLES),
+  g: new Float32Array(MAX_PARTICLES),
+  b: new Float32Array(MAX_PARTICLES),
+};
+const particleMesh = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(0.055, 6, 4),
+  new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9, depthWrite: false }),
+  MAX_PARTICLES,
+);
+particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+particleMesh.setColorAt(0, new THREE.Color(1, 1, 1)); // allocates the per-instance colour buffer
+particleMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+particleMesh.frustumCulled = false;
+particleMesh.count = 0;
+scene.add(particleMesh);
+
+function disposeObject(root) {
+  root.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+    materials.forEach((material) => material.dispose());
+  });
+}
 
 let ship = createShip(selectedShip);
 scene.add(ship);
@@ -496,6 +623,8 @@ function createShip(modelId = "comet") {
   group.add(shieldHalo);
 
   group.position.set(0, 1.05, 4);
+  group.userData.flame = flameGroup;
+  group.userData.halo = shieldHalo;
   group.userData.modelId = modelId;
   group.userData.velocity = 0;
   return group;
@@ -524,6 +653,7 @@ function setShipModel(modelId) {
     ship.position.copy(oldShip.position);
     ship.rotation.copy(oldShip.rotation);
     scene.remove(oldShip);
+    disposeObject(oldShip);
   }
   scene.add(ship);
   shipNameEl.textContent = shipModels[modelId].name;
@@ -537,16 +667,21 @@ function createTrack() {
     transparent: true,
     opacity: 0.18,
   });
-  for (let z = -130; z < 26; z += 6) {
-    const line = new THREE.Mesh(new THREE.BoxGeometry(13, 0.035, 0.035), gridMat);
-    line.position.set(0, 0, z);
-    group.add(line);
-  }
-  for (const x of [-6.2, -3.1, 0, 3.1, 6.2]) {
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.035, 170), gridMat);
-    rail.position.set(x, 0.02, -52);
-    group.add(rail);
-  }
+  const matrix = new THREE.Matrix4();
+
+  const lineZs = [];
+  for (let z = -130; z < 26; z += 6) lineZs.push(z);
+  const lines = new THREE.InstancedMesh(new THREE.BoxGeometry(13, 0.035, 0.035), gridMat, lineZs.length);
+  lineZs.forEach((z, i) => lines.setMatrixAt(i, matrix.makeTranslation(0, 0, z)));
+  lines.frustumCulled = false;
+  group.add(lines);
+
+  const railXs = [-6.2, -3.1, 0, 3.1, 6.2];
+  const rails = new THREE.InstancedMesh(new THREE.BoxGeometry(0.055, 0.035, 170), gridMat, railXs.length);
+  railXs.forEach((x, i) => rails.setMatrixAt(i, matrix.makeTranslation(x, 0.02, -52)));
+  rails.frustumCulled = false;
+  group.add(rails);
+
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(15, 180),
     new THREE.MeshStandardMaterial({
@@ -587,22 +722,7 @@ function createStarField() {
 function createCollectible(x, z) {
   if (patternRecorder) return;
   const group = new THREE.Group();
-  const core = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.48, 1),
-    new THREE.MeshStandardMaterial({
-      color: palette.yellow,
-      emissive: palette.yellow,
-      emissiveIntensity: 1.25,
-      roughness: 0.2,
-      metalness: 0.2,
-    }),
-  );
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(0.72, 0.045, 8, 36),
-    new THREE.MeshBasicMaterial({ color: palette.mint }),
-  );
-  ring.rotation.x = Math.PI / 2;
-  group.add(core, ring);
+  group.add(new THREE.Mesh(assets.starCoreGeo, assets.starCoreMat), new THREE.Mesh(assets.starRingGeo, assets.starRingMat));
   group.position.set(x, 1.18, z);
   group.userData = { type: "star", radius: 0.9 };
   scene.add(group);
@@ -614,36 +734,16 @@ function createObstacle(x, z) {
     patternRecorder.push({ x, z });
     return;
   }
-  const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({
-    color: palette.pink,
-    emissive: palette.pink,
-    emissiveIntensity: 0.65,
-    roughness: 0.28,
-    metalness: 0.32,
-  });
-  const barA = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.28, 0.28), mat);
-  const barB = new THREE.Mesh(new THREE.BoxGeometry(0.28, 2.1, 0.28), mat);
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 10), mat);
-  group.add(barA, barB, core);
-  group.position.set(x, 1.28, z);
-  group.userData = { type: "spinner", radius: OBSTACLE_RADIUS, spin: Math.random() > 0.5 ? 1 : -1 };
-  scene.add(group);
-  activeObjects.push(group);
+  const spinner = new THREE.Mesh(assets.spinnerGeo, assets.spinnerMat);
+  spinner.position.set(x, 1.28, z);
+  spinner.userData = { type: "spinner", radius: OBSTACLE_RADIUS, spin: Math.random() > 0.5 ? 1 : -1, passed: false };
+  scene.add(spinner);
+  activeObjects.push(spinner);
 }
 
 function createBoostRing(x, z) {
   if (patternRecorder) return;
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(1.1, 0.09, 12, 48),
-    new THREE.MeshStandardMaterial({
-      color: palette.cyan,
-      emissive: palette.cyan,
-      emissiveIntensity: 1.1,
-      roughness: 0.2,
-      metalness: 0.3,
-    }),
-  );
+  const ring = new THREE.Mesh(assets.boostRingGeo, assets.boostRingMat);
   ring.rotation.y = Math.PI / 2;
   ring.position.set(x, 1.25, z);
   ring.userData = { type: "boost", radius: 1.15 };
@@ -758,6 +858,15 @@ const spawnPatterns = [
   },
 ];
 
+function shuffledLanes() {
+  const order = [...lanes];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
 // SPAWN-AUDIT-BEGIN
 // How far the slowest ship can slide sideways in `seconds`. Mirrors updateShip():
 // top speed is 11 * agility and velocity eases in at a rate of 1 - 0.001^dt.
@@ -797,7 +906,7 @@ function recordPattern(pattern) {
   const recorded = [];
   patternRecorder = recorded;
   try {
-    pattern.run(0, [...lanes].sort(() => Math.random() - 0.5));
+    pattern.run(0, shuffledLanes());
   } finally {
     patternRecorder = null;
   }
@@ -879,39 +988,145 @@ function spawnWave() {
 
   pendingPattern = null;
   lastSpawnPatternId = pattern.id;
-  pattern.run(SPAWN_Z, [...lanes].sort(() => Math.random() - 0.5));
+  pattern.run(SPAWN_Z, shuffledLanes());
   return true;
 }
 
+const burstColor = new THREE.Color();
+
 function spawnBurst(color, origin, count = 16) {
-  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 });
-  for (let i = 0; i < count; i++) {
-    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 6), mat.clone());
-    dot.position.copy(origin);
-    dot.userData.velocity = new THREE.Vector3(
-      (Math.random() - 0.5) * 9,
-      Math.random() * 5,
-      (Math.random() - 0.5) * 9,
-    );
-    dot.userData.life = 0.7 + Math.random() * 0.4;
-    particles.push(dot);
-    scene.add(dot);
+  const p = particlePool;
+  burstColor.set(color);
+  for (let i = 0; i < count && p.count < MAX_PARTICLES; i++) {
+    const n = p.count++;
+    p.px[n] = origin.x;
+    p.py[n] = origin.y;
+    p.pz[n] = origin.z;
+    p.vx[n] = (Math.random() - 0.5) * 9;
+    p.vy[n] = Math.random() * 5;
+    p.vz[n] = (Math.random() - 0.5) * 9;
+    p.life[n] = 0.7 + Math.random() * 0.4;
+    p.r[n] = burstColor.r;
+    p.g[n] = burstColor.g;
+    p.b[n] = burstColor.b;
   }
+}
+
+function clearParticles() {
+  particlePool.count = 0;
+  particleMesh.count = 0;
+}
+
+function updateParticles(dt) {
+  const p = particlePool;
+  let i = 0;
+  while (i < p.count) {
+    p.life[i] -= dt;
+    if (p.life[i] <= 0) {
+      const last = --p.count; // swap the last live particle into this slot
+      if (i !== last) {
+        p.px[i] = p.px[last];
+        p.py[i] = p.py[last];
+        p.pz[i] = p.pz[last];
+        p.vx[i] = p.vx[last];
+        p.vy[i] = p.vy[last];
+        p.vz[i] = p.vz[last];
+        p.life[i] = p.life[last];
+        p.r[i] = p.r[last];
+        p.g[i] = p.g[last];
+        p.b[i] = p.b[last];
+      }
+      continue;
+    }
+    p.px[i] += p.vx[i] * dt;
+    p.py[i] += p.vy[i] * dt;
+    p.pz[i] += p.vz[i] * dt;
+    p.vy[i] -= 7 * dt;
+    i++;
+  }
+
+  // Write straight into the GPU buffers: scale and colour both fade as a spark ages.
+  const matrices = particleMesh.instanceMatrix.array;
+  const colors = particleMesh.instanceColor.array;
+  for (let j = 0; j < p.count; j++) {
+    const fade = Math.min(p.life[j], 1);
+    const scale = 0.4 + 0.6 * fade;
+    const m = j * 16;
+    matrices[m] = scale;
+    matrices[m + 5] = scale;
+    matrices[m + 10] = scale;
+    matrices[m + 12] = p.px[j];
+    matrices[m + 13] = p.py[j];
+    matrices[m + 14] = p.pz[j];
+    matrices[m + 15] = 1;
+    colors[j * 3] = p.r[j] * fade;
+    colors[j * 3 + 1] = p.g[j] * fade;
+    colors[j * 3 + 2] = p.b[j] * fade;
+  }
+  if (p.count || particleMesh.count) {
+    particleMesh.count = p.count;
+    particleMesh.instanceMatrix.needsUpdate = true;
+    particleMesh.instanceColor.needsUpdate = true;
+  }
+}
+
+function isBoosting() {
+  return input.boost && state.boost > 0 && !state.boostLocked;
+}
+
+function maxShield() {
+  return 100 * shipModels[selectedShip].shield;
+}
+
+let lastRun = { score: 0, ship: "Comet" };
+let shareLabelTimer = 0;
+
+function showCallout(text) {
+  calloutEl.textContent = text;
+  calloutEl.classList.remove("show");
+  void calloutEl.offsetWidth; // restart the animation
+  calloutEl.classList.add("show");
+}
+
+function awardCloseCall() {
+  const bonus = CLOSE_CALL_POINTS * state.combo;
+  state.score += bonus;
+  showCallout(`CLOSE CALL +${bonus}`);
+  playTone({ type: "sine", startFrequency: 520, endFrequency: 900, duration: 0.1, volume: 0.1 });
+}
+
+function resetInput() {
+  input.left = false;
+  input.right = false;
+  input.boost = false;
+  input.pointerX = null;
+}
+
+function setPaused(paused) {
+  if (paused === state.paused || (paused && !state.running)) return;
+  state.paused = paused;
+  pausePanel.classList.toggle("hidden", !paused);
+  resetInput();
+  if (paused) stopEngineHum();
+  else resumeAudio();
 }
 
 function resetGame() {
   resumeAudio();
   activeObjects.splice(0).forEach((object) => scene.remove(object));
-  particles.splice(0).forEach((object) => scene.remove(object));
+  clearParticles();
   lastSpawnPatternId = null;
   pendingPattern = null;
   Object.assign(state, {
     running: true,
+    paused: false,
     score: 0,
     combo: 1,
     speed: 18,
     distance: 0,
-    shield: 100 * shipModels[selectedShip].shield,
+    shield: maxShield(),
+    boost: 100,
+    boostLocked: false,
     invincible: 1,
     spawnTimer: 0,
     sparkTimer: 0,
@@ -922,6 +1137,8 @@ function resetGame() {
   finalMessage.classList.remove("new-best");
   gameOverPanel.classList.add("hidden");
   startPanel.classList.add("hidden");
+  pausePanel.classList.add("hidden");
+  calloutEl.classList.remove("show");
   updateHud();
 }
 
@@ -931,6 +1148,8 @@ function finishGame() {
   const runScore = Math.floor(state.score);
   const previousHighScore = highScore;
   const isNewHighScore = runScore > previousHighScore;
+  lastRun = { score: runScore, ship: shipModels[selectedShip].name };
+  shareButton.textContent = "Share Score";
 
   finalMessage.classList.toggle("new-best", isNewHighScore);
   if (isNewHighScore) {
@@ -950,6 +1169,29 @@ function finishGame() {
   gameOverPanel.classList.remove("hidden");
 }
 
+async function shareScore() {
+  const text = `I scored ${lastRun.score.toLocaleString()} in Star Skimmer 3D flying the ${lastRun.ship}. Can you beat it?`;
+  const flash = (label) => {
+    shareButton.textContent = label;
+    window.clearTimeout(shareLabelTimer);
+    shareLabelTimer = window.setTimeout(() => {
+      shareButton.textContent = "Share Score";
+    }, 1800);
+  };
+  try {
+    // Phones get the native share sheet; desktops just get the text copied.
+    if (navigator.share && window.matchMedia("(pointer: coarse)").matches) {
+      await navigator.share({ title: "Star Skimmer 3D", text, url: SHARE_URL });
+      return;
+    }
+    await navigator.clipboard.writeText(`${text} ${SHARE_URL}`);
+    flash("Copied!");
+  } catch (error) {
+    if (error && error.name === "AbortError") return; // the player closed the share sheet
+    window.prompt("Copy this to share your score:", `${text} ${SHARE_URL}`);
+  }
+}
+
 function updateShip(dt) {
   const keyboardSteer = Number(input.right) - Number(input.left);
   const pointerSteer =
@@ -965,31 +1207,33 @@ function updateShip(dt) {
   ship.rotation.y = THREE.MathUtils.lerp(ship.rotation.y, steer * 0.22, 1 - Math.pow(0.002, dt));
   ship.position.y = 1.05 + Math.sin(clock.elapsedTime * 6.2) * 0.12;
 
-  const flame = ship.getObjectByName("flame");
-  flame.scale.setScalar(input.boost && state.shield > 0 ? 1.7 : 1);
-  const shieldHalo = ship.getObjectByName("shieldHalo");
-  shieldHalo.material.opacity = state.invincible > 0 ? 0.75 : 0.28 + Math.sin(clock.elapsedTime * 5) * 0.08;
+  ship.userData.flame.scale.setScalar(isBoosting() ? 1.7 : 1);
+  ship.userData.halo.material.opacity = state.invincible > 0 ? 0.75 : 0.28 + Math.sin(clock.elapsedTime * 5) * 0.08;
 }
 
 function updateObjects(dt) {
   for (let i = activeObjects.length - 1; i >= 0; i--) {
     const object = activeObjects[i];
+    const data = object.userData;
     object.position.z += state.speed * dt;
     object.rotation.x += dt * 2;
-    object.rotation.y += dt * (object.userData.spin || 1.4);
+    object.rotation.y += dt * (data.spin || 1.4);
+    object.visible = object.position.z > CULL_Z;
 
     const dx = object.position.x - ship.position.x;
     const dz = object.position.z - ship.position.z;
-    const hit = Math.hypot(dx, dz) < object.userData.radius;
+    const hit = Math.hypot(dx, dz) < data.radius;
 
     if (hit) {
-      if (object.userData.type === "star") {
+      if (data.type === "star") {
         state.score += 120 * state.combo;
-        state.combo = Math.min(state.combo + 1, 9);
+        const previousCombo = state.combo;
+        state.combo = Math.min(previousCombo + 1, 9);
+        if (state.combo === 9 && previousCombo < 9) showCallout("MAX COMBO x9");
         playStarChime();
         spawnBurst(palette.yellow, object.position, 18);
         removeActive(i);
-      } else if (object.userData.type === "boost") {
+      } else if (data.type === "boost") {
         state.score += 220 * state.combo;
         state.speed += 4;
         state.invincible = 0.65;
@@ -1007,35 +1251,54 @@ function updateObjects(dt) {
       }
     } else if (object.position.z > 18) {
       removeActive(i);
+    } else if (data.type === "spinner" && !data.passed && object.position.z >= ship.position.z) {
+      // The spinner just drew level with the ship without hitting it: a close call if it was tight.
+      data.passed = true;
+      const gap = Math.abs(dx) - data.radius;
+      if (gap >= 0 && gap < CLOSE_CALL_WINDOW) awardCloseCall();
     }
   }
 }
 
 function removeActive(index) {
-  scene.remove(activeObjects[index]);
+  scene.remove(activeObjects[index]); // geometry and materials are shared, so nothing to dispose
   activeObjects.splice(index, 1);
 }
 
-function updateParticles(dt) {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const dot = particles[i];
-    dot.userData.life -= dt;
-    dot.position.addScaledVector(dot.userData.velocity, dt);
-    dot.userData.velocity.y -= 7 * dt;
-    dot.material.opacity = Math.max(dot.userData.life, 0);
-    if (dot.userData.life <= 0) {
-      scene.remove(dot);
-      particles.splice(i, 1);
-    }
-  }
-}
+// Only touch the page when a number actually changed.
+const hudCache = { score: -1, best: -1, combo: "", speed: "", shield: -1, boost: -1 };
 
 function updateHud() {
-  scoreEl.textContent = Math.floor(state.score).toLocaleString();
-  highScoreEl.textContent = Math.floor(highScore).toLocaleString();
-  comboEl.textContent = `x${state.combo}`;
-  speedEl.textContent = (state.speed / startingSpeed).toFixed(1);
-  shieldEl.style.transform = `scaleX(${Math.max(state.shield, 0) / (100 * shipModels[selectedShip].shield)})`;
+  const score = Math.floor(state.score);
+  if (score !== hudCache.score) {
+    hudCache.score = score;
+    scoreEl.textContent = score.toLocaleString();
+  }
+  const best = Math.floor(highScore);
+  if (best !== hudCache.best) {
+    hudCache.best = best;
+    highScoreEl.textContent = best.toLocaleString();
+  }
+  const combo = `x${state.combo}`;
+  if (combo !== hudCache.combo) {
+    hudCache.combo = combo;
+    comboEl.textContent = combo;
+  }
+  const speed = (state.speed / startingSpeed).toFixed(1);
+  if (speed !== hudCache.speed) {
+    hudCache.speed = speed;
+    speedEl.textContent = speed;
+  }
+  const shield = Math.round((Math.max(state.shield, 0) / maxShield()) * 200) / 200;
+  if (shield !== hudCache.shield) {
+    hudCache.shield = shield;
+    shieldEl.style.transform = `scaleX(${shield})`;
+  }
+  const boost = Math.round(Math.max(state.boost, 0) * 2) / 200;
+  if (boost !== hudCache.boost) {
+    hudCache.boost = boost;
+    boostEl.style.transform = `scaleX(${boost})`;
+  }
 }
 
 function updateCamera(dt) {
@@ -1044,20 +1307,62 @@ function updateCamera(dt) {
   camera.lookAt(ship.position.x * 0.24, 1.2, -10);
 }
 
-function animate() {
-  const dt = Math.min(clock.getDelta(), 0.04);
-  requestAnimationFrame(animate);
+// Drops render resolution when frames run slow, and wins it back when there is headroom.
+function updateQuality(rawDt) {
+  if (rawDt > 0.25) return; // a tab switch or hiccup, not a slow frame
+  quality.smoothed += (rawDt - quality.smoothed) * 0.05;
+  quality.sinceCheck += rawDt;
+  quality.elapsed += rawDt;
+  if (quality.sinceCheck < 1.5) return;
+  quality.sinceCheck = 0;
 
+  let next = quality.current;
+  if (quality.smoothed > 1 / 40 && quality.current > quality.floor) {
+    next = Math.max(quality.floor, quality.current - 0.25);
+    // Went slow soon after stepping up: that level is too much for this device.
+    if (quality.elapsed - quality.lastRaise < 8) quality.ceiling = next;
+    quality.goodChecks = 0;
+  } else if (quality.smoothed < 1 / 52 && quality.current < quality.ceiling) {
+    quality.goodChecks += 1;
+    if (quality.goodChecks >= 3) {
+      next = Math.min(quality.ceiling, quality.current + 0.25);
+      quality.lastRaise = quality.elapsed;
+      quality.goodChecks = 0;
+    }
+  } else {
+    quality.goodChecks = 0;
+  }
+
+  if (next !== quality.current) {
+    quality.current = next;
+    renderer.setPixelRatio(next);
+    resize();
+  }
+}
+
+function animate() {
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.04);
+  requestAnimationFrame(animate);
+  if (state.paused) return; // nothing moves, nothing renders, the GPU rests
+
+  updateQuality(rawDt);
   starField.rotation.y += dt * 0.012;
   track.position.z = (track.position.z + state.speed * dt) % 6;
 
   if (state.running) {
-    const boosted = input.boost && state.shield > 0;
+    const boosted = isBoosting();
     const cruiseSpeed = Math.min(startingSpeed + state.distance * 0.012, maxCruiseSpeed);
     const targetSpeed = boosted ? cruiseSpeed * boostSpeedMultiplier : cruiseSpeed;
     state.speed = THREE.MathUtils.lerp(state.speed, targetSpeed, 0.018);
-    if (boosted) state.shield = Math.max(0, state.shield - dt * 16);
-    else state.shield = Math.min(100, state.shield + dt * 4);
+    if (boosted) {
+      state.boost = Math.max(0, state.boost - dt * BOOST_DRAIN);
+      if (state.boost <= 0) state.boostLocked = true;
+    } else {
+      state.boost = Math.min(100, state.boost + dt * BOOST_REGEN);
+      if (state.boostLocked && state.boost >= BOOST_REARM) state.boostLocked = false;
+    }
+    state.shield = Math.min(maxShield(), state.shield + dt * SHIELD_REGEN);
 
     state.distance += state.speed * dt;
     state.score += dt * state.speed * 2.4 * state.combo;
@@ -1077,12 +1382,16 @@ function animate() {
     updateObjects(dt);
     updateParticles(dt);
     updateHud();
-    updateEngineHum();
   } else {
     state.invincible -= dt;
     ship.rotation.y += dt * 0.35;
     ship.position.y = 1.05 + Math.sin(clock.elapsedTime * 2.5) * 0.18;
     updateParticles(dt);
+  }
+
+  audioState.humTimer -= dt;
+  if (audioState.humTimer <= 0) {
+    audioState.humTimer = HUM_UPDATE_INTERVAL;
     updateEngineHum();
   }
 
@@ -1099,11 +1408,27 @@ function resize() {
   renderer.setSize(width, height, false);
 }
 
+// Compile every shader up front so the first star or spinner of a run never causes a hitch.
+function prewarmShaders() {
+  createCollectible(0, 400);
+  createObstacle(0, 400);
+  createBoostRing(0, 400);
+  renderer.compile(scene, camera);
+  while (activeObjects.length) removeActive(activeObjects.length - 1);
+}
+
 window.addEventListener("resize", resize);
+window.addEventListener("blur", resetInput);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) setPaused(true);
+});
 window.addEventListener("keydown", (event) => {
   if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = true;
   if (event.code === "ArrowRight" || event.code === "KeyD") input.right = true;
   if (event.code === "KeyM" && !event.repeat) setMuted(!audioState.muted);
+  if ((event.code === "KeyP" || event.code === "Escape") && !event.repeat && state.running) {
+    setPaused(!state.paused);
+  }
   if (event.code === "Space") {
     input.boost = true;
     if (!state.running && !startPanel.classList.contains("hidden")) resetGame();
@@ -1132,6 +1457,8 @@ window.addEventListener("pointercancel", () => {
 
 startButton.addEventListener("click", resetGame);
 restartButton.addEventListener("click", resetGame);
+resumeButton.addEventListener("click", () => setPaused(false));
+shareButton.addEventListener("click", shareScore);
 changeShipButton.addEventListener("click", () => {
   state.running = false;
   gameOverPanel.classList.add("hidden");
@@ -1144,4 +1471,12 @@ shipCards.forEach((card) => {
 createMuteButton();
 setShipModel(selectedShip);
 resize();
+updateHud();
+prewarmShaders();
+
+// Test hook: the automated checks set this flag before loading the page. Inert for players.
+if (window.__SKIMMER_DEBUG__) {
+  window.__skimmer = { state, input, activeObjects, particlePool, quality, getShip: () => ship, spawnBurst, setPaused, createObstacle, createCollectible, resetGame };
+}
+
 animate();
