@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Star Skimmer 3D</title>
-    <meta name="game-version" content="hangar-ships-2" />
+    <meta name="game-version" content="hangar-ships-3" />
+    <link rel="preconnect" href="https://unpkg.com" crossorigin />
+    <link rel="modulepreload" href="https://unpkg.com/three@0.164.1/build/three.module.min.js" crossorigin />
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="./src/styles.css" />
@@ -50,13 +52,18 @@
         <div class="meter-wrap">
           <span>Shield</span>
           <div class="meter"><i id="shield"></i></div>
+          <span class="meter-label">Boost</span>
+          <div class="meter boost-meter"><i id="boost"></i></div>
         </div>
         <div class="controls">
           <kbd>A</kbd><kbd>D</kbd><span>or</span><kbd>←</kbd><kbd>→</kbd>
           <span>steer</span>
           <kbd>Space</kbd><span>boost</span>
+          <kbd>P</kbd><span>pause</span>
         </div>
       </section>
+
+      <div id="callout" class="callout" aria-live="polite"></div>
 
       <section id="startPanel" class="overlay">
         <div class="panel">
@@ -94,7 +101,19 @@
           <p id="finalMessage">That was a warm-up run.</p>
           <div class="result-actions">
             <button id="changeShipButton" class="secondary-button" type="button">Change Ship</button>
+            <button id="shareButton" class="secondary-button" type="button">Share Score</button>
             <button id="restartButton" type="button">Run It Back</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="pausePanel" class="overlay hidden">
+        <div class="panel">
+          <p class="eyebrow">Paused</p>
+          <h2>Take a breath.</h2>
+          <p>The storm will wait. Press P or Esc to jump back in.</p>
+          <div class="result-actions">
+            <button id="resumeButton" type="button">Resume</button>
           </div>
         </div>
       </section>
