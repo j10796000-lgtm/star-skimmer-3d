@@ -180,6 +180,73 @@ h1 {
   background: rgba(255, 255, 255, 0.12);
 }
 
+.meter-label {
+  display: block;
+  margin-top: 9px;
+}
+
+.boost-meter i {
+  background: linear-gradient(90deg, #ffef5c, #ff4f8b);
+  box-shadow: 0 0 18px rgba(255, 79, 139, 0.7);
+}
+
+.callout {
+  position: absolute;
+  z-index: 6;
+  top: 26%;
+  left: 50%;
+  opacity: 0;
+  transform: translateX(-50%);
+  pointer-events: none;
+  color: #ffef5c;
+  font-size: clamp(1.1rem, 3vw, 1.9rem);
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 22px rgba(255, 239, 92, 0.55);
+  white-space: nowrap;
+}
+
+.callout.show {
+  animation: callout-pop 0.9s ease-out;
+}
+
+@keyframes callout-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 10px) scale(0.85);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1.05);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -18px) scale(1);
+  }
+}
+
+@keyframes callout-fade {
+  0% {
+    opacity: 0;
+  }
+  15%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .callout.show {
+    animation-name: callout-fade;
+  }
+}
+
 .meter i {
   display: block;
   width: 100%;
